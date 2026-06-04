@@ -18,6 +18,7 @@ import { SecurityModule } from './integrations/security/security.module';
 import { TelemetryModule } from './integrations/telemetry/telemetry.module';
 import { RedisModule } from '@nestjs-labs/nestjs-ioredis';
 import { RedisConfigService } from './integrations/redis/redis-config.service';
+import { GizantechApiModule } from './integrations/gizantech-api/gizantech-api.module';
 
 const enterpriseModules = [];
 try {
@@ -57,6 +58,7 @@ try {
     EventEmitterModule.forRoot(),
     SecurityModule,
     TelemetryModule,
+    GizantechApiModule,
     ...enterpriseModules,
   ],
   controllers: [AppController],
