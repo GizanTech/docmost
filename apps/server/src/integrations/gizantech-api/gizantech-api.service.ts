@@ -93,7 +93,14 @@ export class GizantechApiService {
         { title, content, textContent, ydoc, lastUpdatedById: authorId },
         existing.id,
       );
-      return this.buildResult(existing.id, existing.slugId, title, space, false);
+      return this.buildResult(
+        existing.id,
+        existing.slugId,
+        title,
+        space,
+        existing.parentPageId,
+        false,
+      );
     }
 
     // Idempotent upsert by (space, parent, title).
@@ -107,7 +114,14 @@ export class GizantechApiService {
         { title, content, textContent, ydoc, lastUpdatedById: authorId },
         match.id,
       );
-      return this.buildResult(match.id, match.slugId, title, space, false);
+      return this.buildResult(
+        match.id,
+        match.slugId,
+        title,
+        space,
+        dto.parentPageId ?? null,
+        false,
+      );
     }
 
     const slugId = generateSlugId();
@@ -129,7 +143,14 @@ export class GizantechApiService {
       workspaceId: space.workspaceId,
     });
 
-    return this.buildResult(created.id, created.slugId, title, space, true);
+    return this.buildResult(
+      created.id,
+      created.slugId,
+      title,
+      space,
+      dto.parentPageId ?? null,
+      true,
+    );
   }
 
   async tree(spaceId: string): Promise<TreeNode[]> {
@@ -304,6 +325,7 @@ export class GizantechApiService {
     slugId: string,
     title: string,
     space: { id: string; slug: string | null },
+    parentPageId: string | null,
     created: boolean,
   ): UpsertResult {
     const appUrl = this.environmentService.getAppUrl().replace(/\/$/, '');
@@ -313,7 +335,7 @@ export class GizantechApiService {
       slugId,
       title,
       spaceId: space.id,
-      parentPageId: null,
+      parentPageId,
       url: `${appUrl}/s/${spaceSeg}/p/${slugId}`,
       created,
     };
