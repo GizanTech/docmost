@@ -2,6 +2,7 @@ import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { ApiKeyGuard } from './guards/api-key.guard';
 import { GizantechApiService } from './gizantech-api.service';
 import {
+  CreateSpaceGizDto,
   ExportMdDto,
   MovePageDto,
   TreeDto,
@@ -41,5 +42,11 @@ export class GizantechApiController {
   @Post('move')
   async move(@Body() dto: MovePageDto) {
     return this.service.move(dto);
+  }
+
+  @HttpCode(200)
+  @Post('create-space')
+  async createSpace(@Body() dto: CreateSpaceGizDto) {
+    return this.service.createSpace(dto);
   }
 }
