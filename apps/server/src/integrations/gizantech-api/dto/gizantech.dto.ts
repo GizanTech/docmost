@@ -48,3 +48,20 @@ export class ExportMdDto {
   @IsIn(['markdown', 'html'])
   format?: 'markdown' | 'html';
 }
+
+export class MovePageDto {
+  @IsString()
+  @IsNotEmpty()
+  pageId: string;
+
+  // Move the page (and its descendants) into this space.
+  @IsOptional()
+  @IsString()
+  spaceId?: string;
+
+  // Re-parent under this page within the target space. Pass null to move to
+  // the space root. Omit to leave the parent unchanged.
+  @IsOptional()
+  @IsString()
+  parentPageId?: string | null;
+}

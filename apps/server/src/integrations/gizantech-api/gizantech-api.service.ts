@@ -20,7 +20,8 @@ import { generateSlugId } from '../../common/helpers';
 import { EnvironmentService } from '../environment/environment.service';
 import { ExportService } from '../export/export.service';
 import { ExportFormat } from '../export/dto/export-dto';
-import { UpsertPageDto } from './dto/gizantech.dto';
+import { PageService } from '../../core/page/services/page.service';
+import { MovePageDto, UpsertPageDto } from './dto/gizantech.dto';
 
 export interface UpsertResult {
   id: string;
@@ -51,6 +52,7 @@ export class GizantechApiService {
     private readonly pageRepo: PageRepo,
     private readonly environmentService: EnvironmentService,
     private readonly exportService: ExportService,
+    private readonly pageService: PageService,
   ) {}
 
   /**
@@ -255,6 +257,71 @@ export class GizantechApiService {
       tiptapExtensions,
     );
     return Buffer.from(Y.encodeStateAsUpdate(ydoc));
+  }
+
+  /**
+   * Move a page within or across spaces. When `spaceId` is given and differs
+   * from the page's current space, the page and all its descendants are moved
+   * into that space first (cascading). When `parentPageId` is provided, the
+   * page is re-parented within the target space (pass null for the space root);
+   * a fresh end-of-list position is computed server-side. Returns the canonical
+   * result with the (possibly unchanged) authenticated URL.
+   */
+  async move(dto: MovePageDto): Promise<UpsertResult> {
+    let page = await this.pageRepo.findById(dto.pageId);
+    if (!page) {
+      throw new NotFoundException('Page not found');
+    }
+
+    // 1) Change space first (cascades to descendants), if requested.
+    if (dto.spaceId && dto.spaceId !== page.spaceId) {
+      const targetSpace = await this.db
+        .selectFrom('spaces')
+        .select(['id'])
+        .where('id', '=', dto.spaceId)
+        .where('deletedAt', 'is', null)
+        .executeTakeFirst();
+      if (!targetSpace) {
+        throw new NotFoundException('Target space not found');
+      }
+      await this.pageService.movePageToSpace(page, dto.spaceId);
+      page = await this.pageRepo.findById(dto.pageId);
+    }
+
+    // 2) Re-parent / reorder within the current space, if requested.
+    if (dto.parentPageId !== undefined) {
+      const parentPageId = dto.parentPageId ?? null;
+      if (parentPageId) {
+        const parent = await this.pageRepo.findById(parentPageId);
+        if (!parent || parent.spaceId !== page.spaceId) {
+          throw new NotFoundException('Parent page not found in target space');
+        }
+      }
+      const position = await this.pageService.nextPagePosition(
+        page.spaceId,
+        parentPageId ?? undefined,
+      );
+      await this.pageService.movePage(
+        { pageId: page.id, parentPageId, position },
+        page,
+      );
+      page = await this.pageRepo.findById(dto.pageId);
+    }
+
+    const space = await this.db
+      .selectFrom('spaces')
+      .select(['id', 'slug'])
+      .where('id', '=', page.spaceId)
+      .executeTakeFirst();
+
+    return this.buildResult(
+      page.id,
+      page.slugId,
+      page.title,
+      space,
+      page.parentPageId,
+      false,
+    );
   }
 
   private async findByTitle(
