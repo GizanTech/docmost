@@ -297,9 +297,9 @@ export class GizantechApiService {
           throw new NotFoundException('Parent page not found in target space');
         }
       }
-      const position = await this.pageService.nextPagePosition(
+      const position = await this.getNewPagePosition(
         page.spaceId,
-        parentPageId ?? undefined,
+        parentPageId,
       );
       await this.pageService.movePage(
         { pageId: page.id, parentPageId, position },
@@ -351,15 +351,35 @@ export class GizantechApiService {
       .select(['id', 'position'])
       .where('spaceId', '=', spaceId)
       .orderBy('position', (ob) => ob.collate('C').desc())
-      .limit(1);
+      .limit(50);
     q =
       parentPageId === null
         ? q.where('parentPageId', 'is', null)
         : q.where('parentPageId', '=', parentPageId);
-    const lastPage = await q.executeTakeFirst();
-    return lastPage
-      ? generateJitteredKeyBetween(lastPage.position, null)
-      : generateJitteredKeyBetween(null, null);
+    const rows = await q.execute();
+    return this.safeAppendKey(
+      rows.map((r) => r.position).filter((p): p is string => !!p),
+    );
+  }
+
+  /**
+   * Build a fractional-index key that sorts after the highest existing sibling.
+   * Docmost's frontend reorders pages with the non-jittered `fractional-indexing`
+   * library, which can persist keys (e.g. "z0"/"z1") that the server-side
+   * `fractional-indexing-jittered` validator rejects with "invalid firstChar on
+   * key". We therefore walk the top positions (highest first) and append after
+   * the first one that parses; if none parse, we mint a fresh first key so the
+   * insert always succeeds.
+   */
+  private safeAppendKey(positionsDesc: string[]): string {
+    for (const pos of positionsDesc) {
+      try {
+        return generateJitteredKeyBetween(pos, null);
+      } catch {
+        // legacy/non-jittered key — try the next-lower sibling
+      }
+    }
+    return generateJitteredKeyBetween(null, null);
   }
 
   private async resolveAuthor(
