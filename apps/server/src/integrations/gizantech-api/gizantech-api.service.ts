@@ -21,7 +21,13 @@ import { EnvironmentService } from '../environment/environment.service';
 import { ExportService } from '../export/export.service';
 import { ExportFormat } from '../export/dto/export-dto';
 import { PageService } from '../../core/page/services/page.service';
-import { MovePageDto, UpsertPageDto } from './dto/gizantech.dto';
+import { SpaceService } from '../../core/space/services/space.service';
+import { User } from '@docmost/db/types/entity.types';
+import {
+  CreateSpaceGizDto,
+  MovePageDto,
+  UpsertPageDto,
+} from './dto/gizantech.dto';
 
 export interface UpsertResult {
   id: string;
@@ -43,6 +49,14 @@ export interface TreeNode {
   children: TreeNode[];
 }
 
+export interface SpaceResult {
+  id: string;
+  name: string;
+  slug: string | null;
+  url: string;
+  created: boolean;
+}
+
 @Injectable()
 export class GizantechApiService {
   private readonly logger = new Logger(GizantechApiService.name);
@@ -53,6 +67,7 @@ export class GizantechApiService {
     private readonly environmentService: EnvironmentService,
     private readonly exportService: ExportService,
     private readonly pageService: PageService,
+    private readonly spaceService: SpaceService,
   ) {}
 
   /**
@@ -380,6 +395,87 @@ export class GizantechApiService {
       }
     }
     return generateJitteredKeyBetween(null, null);
+  }
+
+  /**
+   * Create a new space (API-key surface). Mirrors the privileged behaviour of
+   * the page upsert path: it bypasses the workspace-role ACL that gates the
+   * stock POST /api/spaces/create (members get 403), so the MCP/service account
+   * can provision project spaces. The resolved author becomes the space admin.
+   */
+  async createSpace(dto: CreateSpaceGizDto): Promise<SpaceResult> {
+    const workspace = await this.db
+      .selectFrom('workspaces')
+      .select(['id'])
+      .orderBy('createdAt', 'asc')
+      .limit(1)
+      .executeTakeFirst();
+    if (!workspace) {
+      throw new BadRequestException('No workspace available');
+    }
+
+    const authorId = await this.resolveAuthor(workspace.id, dto.authorUserId);
+    const authUser = await this.db
+      .selectFrom('users')
+      .selectAll()
+      .where('id', '=', authorId)
+      .where('deletedAt', 'is', null)
+      .executeTakeFirst();
+    if (!authUser) {
+      throw new BadRequestException('Author user not found');
+    }
+
+    const slug = await this.normalizeSpaceSlug(
+      dto.slug ?? dto.name,
+      workspace.id,
+    );
+
+    const space = await this.spaceService.createSpace(
+      authUser as unknown as User,
+      workspace.id,
+      { name: dto.name, slug, description: dto.description },
+    );
+
+    const appUrl = this.environmentService.getAppUrl().replace(/\/$/, '');
+    const spaceSeg = space.slug ?? space.id;
+    return {
+      id: space.id,
+      name: space.name,
+      slug: space.slug ?? null,
+      url: `${appUrl}/s/${spaceSeg}/home`,
+      created: true,
+    };
+  }
+
+  /**
+   * Produce a unique alphanumeric slug (Docmost requires letters/numbers only,
+   * 2-50 chars). Strips non-alphanumerics from the base, lowercases, and
+   * auto-suffixes on collision within the workspace.
+   */
+  private async normalizeSpaceSlug(
+    base: string,
+    workspaceId: string,
+  ): Promise<string> {
+    let slug = (base || 'space').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (slug.length < 2) {
+      slug = 'space';
+    }
+    slug = slug.slice(0, 50);
+
+    for (let i = 0; i < 6; i++) {
+      const exists = await this.db
+        .selectFrom('spaces')
+        .select('id')
+        .where('slug', '=', slug)
+        .where('workspaceId', '=', workspaceId)
+        .executeTakeFirst();
+      if (!exists) {
+        return slug;
+      }
+      const suffix = Math.random().toString(36).slice(2, 6);
+      slug = (slug.slice(0, 45) + suffix).slice(0, 50);
+    }
+    return slug;
   }
 
   private async resolveAuthor(

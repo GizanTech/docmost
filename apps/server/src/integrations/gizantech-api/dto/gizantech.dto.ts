@@ -3,6 +3,8 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
+  MinLength,
 } from 'class-validator';
 
 export class UpsertPageDto {
@@ -64,4 +66,27 @@ export class MovePageDto {
   @IsOptional()
   @IsString()
   parentPageId?: string | null;
+}
+
+export class CreateSpaceGizDto {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(50)
+  name: string;
+
+  // Optional. Derived from name (alphanumeric, lowercased) when omitted, with
+  // an auto-suffix on collision.
+  @IsOptional()
+  @IsString()
+  slug?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  // Optional creator. Falls back to GIZANTECH_API_USER_ID or first workspace
+  // user.
+  @IsOptional()
+  @IsString()
+  authorUserId?: string;
 }
