@@ -1,3 +1,4 @@
+import { CollaborationModule } from '../../collaboration/collaboration.module';
 import { Module } from '@nestjs/common';
 import { GizantechApiController } from './gizantech-api.controller';
 import { GizantechApiService } from './gizantech-api.service';
@@ -6,7 +7,7 @@ import { PageModule } from '../../core/page/page.module';
 import { SpaceModule } from '../../core/space/space.module';
 
 @Module({
-  imports: [ExportModule, PageModule, SpaceModule],
+  imports: [ExportModule, PageModule, SpaceModule, CollaborationModule],
   controllers: [GizantechApiController],
   providers: [GizantechApiService],
 })

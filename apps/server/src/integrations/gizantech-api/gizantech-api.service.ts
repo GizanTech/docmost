@@ -1,3 +1,4 @@
+import { CollaborationGateway } from '../../collaboration/collaboration.gateway';
 import {
   BadRequestException,
   Injectable,
@@ -14,6 +15,7 @@ import { generateJitteredKeyBetween } from 'fractional-indexing-jittered';
 import {
   htmlToJson,
   jsonToText,
+  replaceYdocContent,
   tiptapExtensions,
 } from '../../collaboration/collaboration.util';
 import { generateSlugId } from '../../common/helpers';
@@ -68,6 +70,7 @@ export class GizantechApiService {
     private readonly exportService: ExportService,
     private readonly pageService: PageService,
     private readonly spaceService: SpaceService,
+    private readonly collaborationGateway: CollaborationGateway,
   ) {}
 
   /**
@@ -92,9 +95,6 @@ export class GizantechApiService {
       await this.markdownToProsemirror(dto.markdown);
 
     const title = dto.title ?? extractedTitle ?? 'Untitled';
-    const content = prosemirrorJson;
-    const textContent = jsonToText(prosemirrorJson);
-    const ydoc = await this.createYdoc(prosemirrorJson);
     const authorId = await this.resolveAuthor(
       space.workspaceId,
       dto.authorUserId,
@@ -106,9 +106,11 @@ export class GizantechApiService {
       if (!existing || existing.spaceId !== dto.spaceId) {
         throw new NotFoundException('Page not found in the given space');
       }
-      await this.pageRepo.updatePage(
-        { title, content, textContent, ydoc, lastUpdatedById: authorId },
+      await this.updateExistingPage(
         existing.id,
+        title,
+        prosemirrorJson,
+        authorId,
       );
       return this.buildResult(
         existing.id,
@@ -127,10 +129,7 @@ export class GizantechApiService {
       title,
     );
     if (match) {
-      await this.pageRepo.updatePage(
-        { title, content, textContent, ydoc, lastUpdatedById: authorId },
-        match.id,
-      );
+      await this.updateExistingPage(match.id, title, prosemirrorJson, authorId);
       return this.buildResult(
         match.id,
         match.slugId,
@@ -141,6 +140,9 @@ export class GizantechApiService {
       );
     }
 
+    const content = prosemirrorJson;
+    const textContent = jsonToText(prosemirrorJson);
+    const ydoc = await this.createYdoc(prosemirrorJson);
     const slugId = generateSlugId();
     const position = await this.getNewPagePosition(
       dto.spaceId,
@@ -230,6 +232,24 @@ export class GizantechApiService {
   }
 
   // --- helpers -------------------------------------------------------------
+
+  private async updateExistingPage(
+    pageId: string,
+    title: string,
+    content: any,
+    authorId: string,
+  ): Promise<void> {
+    // resolveAuthor already validated this id for the target workspace.
+    await this.collaborationGateway.withYdocConnection(
+      `page.${pageId}`,
+      { user: { id: authorId } },
+      (document) => replaceYdocContent(document, content),
+    );
+    await this.pageRepo.updatePage(
+      { title, lastUpdatedById: authorId },
+      pageId,
+    );
+  }
 
   private async markdownToProsemirror(
     markdown: string,
@@ -482,23 +502,23 @@ export class GizantechApiService {
     workspaceId: string,
     authorUserId?: string,
   ): Promise<string> {
-    if (authorUserId) {
-      return authorUserId;
-    }
-    const envUser = process.env.GIZANTECH_API_USER_ID;
-    if (envUser) {
-      return envUser;
-    }
-    const user = await this.db
+    const requestedId = authorUserId || process.env.GIZANTECH_API_USER_ID;
+    let query = this.db
       .selectFrom('users')
-      .select(['id'])
+      .select('id')
       .where('workspaceId', '=', workspaceId)
       .where('deletedAt', 'is', null)
-      .orderBy('createdAt', 'asc')
-      .limit(1)
-      .executeTakeFirst();
+      .where('deactivatedAt', 'is', null);
+    query = requestedId
+      ? query.where('id', '=', requestedId)
+      : query.orderBy('createdAt', 'asc').limit(1);
+    const user = await query.executeTakeFirst();
     if (!user) {
-      throw new BadRequestException('No user available to attribute the page');
+      throw new BadRequestException(
+        requestedId
+          ? 'Author user not found'
+          : 'No user available to attribute the page',
+      );
     }
     return user.id;
   }
