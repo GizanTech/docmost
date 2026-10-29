@@ -1,3 +1,5 @@
+import * as Y from 'yjs';
+import { TiptapTransformer } from '@hocuspocus/transformer';
 import { StarterKit } from '@tiptap/starter-kit';
 import { TextAlign } from '@tiptap/extension-text-align';
 import { TaskList } from '@tiptap/extension-task-list';
@@ -115,4 +117,27 @@ export function jsonToNode(tiptapJson: JSONContent) {
 
 export function getPageId(documentName: string) {
   return documentName.split('.')[1];
+}
+
+/** Replace visible content while retaining the document's item/deletion history. */
+export function replaceYdocContent(
+  document: Y.Doc,
+  content: JSONContent,
+): void {
+  // Convert before deleting: invalid content must leave the live document intact.
+  const replacement = TiptapTransformer.toYdoc(
+    content,
+    'default',
+    tiptapExtensions,
+  );
+  try {
+    const update = Y.encodeStateAsUpdate(replacement);
+    document.transact(() => {
+      const fragment = document.getXmlFragment('default');
+      fragment.delete(0, fragment.length);
+      Y.applyUpdate(document, update);
+    });
+  } finally {
+    replacement.destroy();
+  }
 }

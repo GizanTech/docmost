@@ -1,0 +1,164 @@
+jest.mock('../../common/helpers/prosemirror/html', () => ({}));
+jest.mock('@docmost/db/repos/page/page.repo', () => ({ PageRepo: class {} }), {
+  virtual: true,
+});
+jest.mock('../../collaboration/collaboration.gateway', () => ({
+  CollaborationGateway: class {},
+}));
+jest.mock('../export/export.service', () => ({ ExportService: class {} }));
+jest.mock('../../core/page/services/page.service', () => ({
+  PageService: class {},
+}));
+jest.mock('../../core/space/services/space.service', () => ({
+  SpaceService: class {},
+}));
+jest.mock('../../common/helpers', () => ({ generateSlugId: () => 'new-slug' }));
+
+import * as Y from 'yjs';
+import { TiptapTransformer } from '@hocuspocus/transformer';
+import { GizantechApiService } from './gizantech-api.service';
+import { tiptapExtensions } from '../../collaboration/collaboration.util';
+
+const content = {
+  type: 'doc',
+  content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'new body' }] },
+  ],
+};
+
+describe('GizantechApiService collaborative upsert', () => {
+  const page = {
+    id: 'page-id',
+    slugId: 'page-slug',
+    spaceId: 'space-id',
+    parentPageId: null,
+  };
+  const user = { id: 'author', workspaceId: 'workspace-id' };
+  let service: GizantechApiService;
+  let repo: any;
+  let gateway: any;
+  let document: Y.Doc;
+
+  beforeEach(() => {
+    const db = {
+      selectFrom: jest.fn((table) => {
+        const query: any = {};
+        for (const method of ['select', 'selectAll', 'where'])
+          query[method] = jest.fn(() => query);
+        query.executeTakeFirst = jest.fn(async () =>
+          table === 'spaces'
+            ? { id: 'space-id', slug: 'space', workspaceId: 'workspace-id' }
+            : user,
+        );
+        return query;
+      }),
+    };
+    repo = {
+      findById: jest.fn(async () => page),
+      updatePage: jest.fn(),
+      insertPage: jest.fn(async () => ({ id: 'new-id', slugId: 'new-slug' })),
+    };
+    document = TiptapTransformer.toYdoc(
+      {
+        ...content,
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'old body' }] },
+        ],
+      },
+      'default',
+      tiptapExtensions,
+    );
+    gateway = {
+      withYdocConnection: jest.fn(async (_name, _context, fn) => fn(document)),
+    };
+    service = new GizantechApiService(
+      db as any,
+      repo,
+      { getAppUrl: () => 'https://example.test' } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      gateway,
+    );
+    jest
+      .spyOn(service as any, 'markdownToProsemirror')
+      .mockResolvedValue({ title: 'Title', prosemirrorJson: content });
+    jest.spyOn(service as any, 'findByTitle').mockResolvedValue(page);
+    jest.spyOn(service as any, 'getNewPagePosition').mockResolvedValue('a0');
+  });
+  afterEach(() => document.destroy());
+
+  it.each([true, false])(
+    'updates through the live document (pageId supplied: %s)',
+    async (explicitId) => {
+      const result = await service.upsert({
+        spaceId: 'space-id',
+        markdown: 'body',
+        authorUserId: 'author',
+        ...(explicitId ? { pageId: page.id } : {}),
+      });
+      expect(gateway.withYdocConnection).toHaveBeenCalledWith(
+        'page.page-id',
+        { user },
+        expect.any(Function),
+      );
+      expect(repo.updatePage).toHaveBeenCalledTimes(1);
+      expect(repo.updatePage).toHaveBeenCalledWith(
+        { title: 'Title', lastUpdatedById: 'author' },
+        page.id,
+      );
+      expect(repo.insertPage).not.toHaveBeenCalled();
+      expect(
+        TiptapTransformer.fromYdoc(document, 'default').content[0].content[0]
+          .text,
+      ).toBe('new body');
+      expect(result).toEqual({
+        ...page,
+        title: 'Title',
+        url: 'https://example.test/s/space/p/page-slug',
+        created: false,
+      });
+    },
+  );
+
+  it('keeps fresh state on new-page insertion', async () => {
+    (service as any).findByTitle.mockResolvedValue(undefined);
+    const result = await service.upsert({
+      spaceId: 'space-id',
+      markdown: 'body',
+      authorUserId: 'author',
+    });
+    expect(gateway.withYdocConnection).not.toHaveBeenCalled();
+    expect(repo.updatePage).not.toHaveBeenCalled();
+    expect(repo.insertPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content,
+        textContent: 'new body',
+        ydoc: expect.any(Buffer),
+        creatorId: 'author',
+        title: 'Title',
+      }),
+    );
+    const inserted = new Y.Doc();
+    Y.applyUpdate(inserted, repo.insertPage.mock.calls[0][0].ydoc);
+    expect(
+      TiptapTransformer.fromYdoc(inserted, 'default').content[0].content[0]
+        .text,
+    ).toBe('new body');
+    expect(result.created).toBe(true);
+    inserted.destroy();
+  });
+
+  it('does not update metadata when the collaborative edit fails', async () => {
+    gateway.withYdocConnection.mockRejectedValue(new Error('store failed'));
+    await expect(
+      service.upsert({
+        spaceId: 'space-id',
+        pageId: page.id,
+        markdown: 'body',
+        authorUserId: 'author',
+      }),
+    ).rejects.toThrow('store failed');
+    expect(repo.updatePage).not.toHaveBeenCalled();
+  });
+});

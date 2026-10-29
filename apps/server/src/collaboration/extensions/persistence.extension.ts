@@ -107,6 +107,7 @@ export class PersistenceExtension implements Extension {
         page = await this.pageRepo.findById(pageId, {
           withLock: true,
           includeContent: true,
+          includeYdoc: true,
           trx,
         });
 
@@ -116,6 +117,11 @@ export class PersistenceExtension implements Extension {
         }
 
         if (isDeepStrictEqual(tiptapJson, page.content)) {
+          // Equal JSON can still have different item IDs/deletions (including a
+          // previously null ydoc). Persist that history without content events.
+          if (!page.ydoc || !Buffer.from(page.ydoc).equals(ydocState)) {
+            await this.pageRepo.updatePage({ ydoc: ydocState }, pageId, trx);
+          }
           page = null;
           return;
         }
@@ -150,6 +156,7 @@ export class PersistenceExtension implements Extension {
       });
     } catch (err) {
       this.logger.error(`Failed to update page ${pageId}`, err);
+      if (data.socketId === 'server') throw err;
     }
 
     if (page) {
@@ -179,7 +186,7 @@ export class PersistenceExtension implements Extension {
 
   async onChange(data: onChangePayload) {
     const documentName = data.documentName;
-    const userId = data.context?.user.id;
+    const userId = data.context?.user?.id;
     if (!userId) return;
 
     if (!this.contributors.has(documentName)) {
