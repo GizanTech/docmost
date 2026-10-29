@@ -249,17 +249,18 @@ export class GizantechApiService {
   ): Promise<void> {
     const user = await this.db
       .selectFrom('users')
-      .selectAll()
+      .select('id')
       .where('id', '=', authorId)
       .where('workspaceId', '=', workspaceId)
       .where('deletedAt', 'is', null)
+      .where('deactivatedAt', 'is', null)
       .executeTakeFirst();
     if (!user) {
       throw new BadRequestException('Author user not found');
     }
     await this.collaborationGateway.withYdocConnection(
       `page.${pageId}`,
-      { user: user as unknown as User },
+      { user },
       (document) => replaceYdocContent(document, content),
     );
     await this.pageRepo.updatePage({ title, lastUpdatedById: authorId }, pageId);

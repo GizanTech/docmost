@@ -28,6 +28,17 @@ import { Page } from '@docmost/db/types/entity.types';
 @Injectable()
 export class PersistenceExtension implements Extension {
   private readonly logger = new Logger(PersistenceExtension.name);
+  private readonly persistedDirectStates = new WeakMap<Y.Doc, Buffer>();
+
+  isDirectEditPersisted(document: Y.Doc): boolean {
+    // State vectors omit deletions. Compare the full committed update instead.
+    return (
+      this.persistedDirectStates
+        .get(document)
+        ?.equals(Buffer.from(Y.encodeStateAsUpdate(document))) ?? false
+    );
+  }
+
   private contributors: Map<string, Set<string>> = new Map();
 
   constructor(
@@ -101,6 +112,7 @@ export class PersistenceExtension implements Extension {
     }
 
     let page: Page = null;
+    let stored = false;
 
     try {
       await executeTx(this.db, async (trx) => {
@@ -112,16 +124,20 @@ export class PersistenceExtension implements Extension {
         });
 
         if (!page) {
-          this.logger.error(`Page with id ${pageId} not found`);
-          return;
+          throw new Error(`Page with id ${pageId} not found`);
         }
 
         if (isDeepStrictEqual(tiptapJson, page.content)) {
           // Equal JSON can still have different item IDs/deletions (including a
           // previously null ydoc). Persist that history without content events.
           if (!page.ydoc || !Buffer.from(page.ydoc).equals(ydocState)) {
-            await this.pageRepo.updatePage({ ydoc: ydocState }, pageId, trx);
+            await trx
+              .updateTable('pages')
+              .set({ ydoc: ydocState })
+              .where('id', '=', pageId)
+              .executeTakeFirst();
           }
+          stored = true;
           page = null;
           return;
         }
@@ -129,7 +145,8 @@ export class PersistenceExtension implements Extension {
         let contributorIds = undefined;
         try {
           const existingContributors = page.contributorIds || [];
-          const contributorSet = this.contributors.get(documentName);
+          const contributorSet = new Set(this.contributors.get(documentName));
+          if (data.socketId === 'server') contributorSet.add(context.user.id);
           contributorSet.add(page.creatorId);
           const newContributors = [...contributorSet];
           contributorIds = Array.from(
@@ -152,8 +169,13 @@ export class PersistenceExtension implements Extension {
           trx,
         );
 
+        stored = true;
         this.logger.debug(`Page updated: ${pageId} - SlugId: ${page.slugId}`);
       });
+      // Only acknowledge after the transaction commits, including equal JSON.
+      if (stored && data.socketId === 'server') {
+        this.persistedDirectStates.set(document, ydocState);
+      }
     } catch (err) {
       this.logger.error(`Failed to update page ${pageId}`, err);
       if (data.socketId === 'server') throw err;

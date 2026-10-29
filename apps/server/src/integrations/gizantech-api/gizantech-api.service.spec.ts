@@ -15,6 +15,7 @@ jest.mock('../../core/space/services/space.service', () => ({
 jest.mock('../../common/helpers', () => ({ generateSlugId: () => 'new-slug' }));
 
 import * as Y from 'yjs';
+import { ServiceUnavailableException } from '@nestjs/common';
 import { TiptapTransformer } from '@hocuspocus/transformer';
 import { GizantechApiService } from './gizantech-api.service';
 import { tiptapExtensions } from '../../collaboration/collaboration.util';
@@ -35,12 +36,15 @@ describe('GizantechApiService collaborative upsert', () => {
   };
   const user = { id: 'author', workspaceId: 'workspace-id' };
   let service: GizantechApiService;
+  let db: any;
+  let authorAvailable: boolean;
   let repo: any;
   let gateway: any;
   let document: Y.Doc;
 
   beforeEach(() => {
-    const db = {
+    authorAvailable = true;
+    db = {
       selectFrom: jest.fn((table) => {
         const query: any = {};
         for (const method of ['select', 'selectAll', 'where'])
@@ -48,7 +52,9 @@ describe('GizantechApiService collaborative upsert', () => {
         query.executeTakeFirst = jest.fn(async () =>
           table === 'spaces'
             ? { id: 'space-id', slug: 'space', workspaceId: 'workspace-id' }
-            : user,
+            : authorAvailable
+              ? { id: user.id }
+              : undefined,
         );
         return query;
       }),
@@ -99,7 +105,7 @@ describe('GizantechApiService collaborative upsert', () => {
       });
       expect(gateway.withYdocConnection).toHaveBeenCalledWith(
         'page.page-id',
-        { user },
+        { user: { id: user.id } },
         expect.any(Function),
       );
       expect(repo.updatePage).toHaveBeenCalledTimes(1);
@@ -150,7 +156,9 @@ describe('GizantechApiService collaborative upsert', () => {
   });
 
   it('does not update metadata when the collaborative edit fails', async () => {
-    gateway.withYdocConnection.mockRejectedValue(new Error('store failed'));
+    gateway.withYdocConnection.mockRejectedValue(
+      new ServiceUnavailableException('store failed'),
+    );
     await expect(
       service.upsert({
         spaceId: 'space-id',
@@ -158,7 +166,41 @@ describe('GizantechApiService collaborative upsert', () => {
         markdown: 'body',
         authorUserId: 'author',
       }),
-    ).rejects.toThrow('store failed');
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(repo.updatePage).not.toHaveBeenCalled();
+  });
+  it('selects only the author id and excludes deactivated users', async () => {
+    await service.upsert({
+      spaceId: 'space-id',
+      pageId: page.id,
+      markdown: 'body',
+      authorUserId: 'author',
+    });
+    const query = db.selectFrom.mock.results.find(
+      (_result: any, i: number) => db.selectFrom.mock.calls[i][0] === 'users',
+    ).value;
+    expect(query.select).toHaveBeenCalledWith('id');
+    expect(query.selectAll).not.toHaveBeenCalled();
+    expect(query.where).toHaveBeenCalledWith('deactivatedAt', 'is', null);
+    expect(query.where).toHaveBeenCalledWith('deletedAt', 'is', null);
+    expect(query.where).toHaveBeenCalledWith(
+      'workspaceId',
+      '=',
+      'workspace-id',
+    );
+  });
+
+  it('rejects an unavailable author before editing content or metadata', async () => {
+    authorAvailable = false;
+    await expect(
+      service.upsert({
+        spaceId: 'space-id',
+        pageId: page.id,
+        markdown: 'body',
+        authorUserId: 'author',
+      }),
+    ).rejects.toThrow('Author user not found');
+    expect(gateway.withYdocConnection).not.toHaveBeenCalled();
     expect(repo.updatePage).not.toHaveBeenCalled();
   });
 });

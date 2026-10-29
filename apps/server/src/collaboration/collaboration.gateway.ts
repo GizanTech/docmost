@@ -56,27 +56,71 @@ export class CollaborationGateway {
 
   async withYdocConnection(
     documentName: string,
-    context: { user: User },
+    context: { user: Pick<User, 'id'> },
     change: (document: Doc) => void,
   ): Promise<void> {
-    if (
-      this.environmentService.getCollabUrl() &&
-      this.environmentService.isCollabDisableRedis()
-    ) {
+    // Redis afterLoadDocument does not wait for remote state. Replacements
+    // require API and collaboration in the same single process; multiple app
+    // replicas sharing Redis have the same unsupported limitation.
+    if (this.environmentService.getCollabUrl()) {
       throw new ServiceUnavailableException(
-        'API page edits require Redis synchronization when COLLAB_URL is configured',
+        'API edits of existing pages require a single API/collaboration process; COLLAB_URL must not be configured',
       );
     }
     const connection = await this.hocuspocus.openDirectConnection(
       documentName,
       context,
     );
+    const document = connection.document!;
+    let persisted = false;
     try {
-      // Hocuspocus 2.15 requests an immediate store, bypassing debounce.
-      // Redis still arbitrates stores; this is not a cross-process sync barrier.
       await connection.transact(change);
+      // Redis 2.15 can silently skip persistence on lock contention. Its default
+      // lock timeout is 1000ms; retry stores (not the edit) across that window.
+      for (let retry = 0; retry < 5; retry++) {
+        if (this.persistenceExtension.isDirectEditPersisted(document)) {
+          persisted = true;
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        await connection.transact(() => {});
+      }
+      if (!this.persistenceExtension.isDirectEditPersisted(document)) {
+        throw new ServiceUnavailableException(
+          'Page persistence could not be confirmed; retry the full-body upsert',
+        );
+      }
+      persisted = true;
+    } catch (error) {
+      // Full-body replacement is idempotent, so callers can retry a failed upsert.
+      // Connected browsers already see the edit and their next store may save it.
+      throw new ServiceUnavailableException(
+        'Page persistence could not be confirmed; retry the full-body upsert',
+        { cause: error },
+      );
     } finally {
-      await connection.disconnect();
+      // DirectConnection.disconnect() stores again, even after a failed edit.
+      // Use the public 2.15 Document lifecycle methods to release without saving
+      // a failed write later, and unload idle docs so destroy() can complete.
+      if (persisted) {
+        // Preserve Redis's afterStoreDocument sync delay on successful writes.
+        // A redundant disconnect store may fail, but this edit is committed.
+        try {
+          await connection.disconnect();
+        } catch {
+          // disconnect already decremented the direct connection count.
+          connection.document = null;
+          if (document.getConnectionsCount() === 0) {
+            await this.hocuspocus.unloadDocument(document);
+          }
+        }
+      } else {
+        document.removeDirectConnection();
+        connection.document = null;
+        if (document.getConnectionsCount() === 0) {
+          await this.hocuspocus.unloadDocument(document);
+        }
+      }
     }
   }
 
