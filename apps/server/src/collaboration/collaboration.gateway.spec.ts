@@ -11,8 +11,14 @@ jest.mock('../common/helpers', () => ({
 }));
 
 import * as Y from 'yjs';
-import { Hocuspocus } from '@hocuspocus/server';
-import { ServiceUnavailableException } from '@nestjs/common';
+import { Hocuspocus, Server as HocuspocusServer } from '@hocuspocus/server';
+import {
+  BadRequestException,
+  ForbiddenException,
+  InternalServerErrorException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { CollaborationGateway } from './collaboration.gateway';
 
 describe('CollaborationGateway direct edits', () => {
@@ -27,6 +33,11 @@ describe('CollaborationGateway direct edits', () => {
     store = jest.fn(async ({ document }) => {
       saved = Buffer.from(Y.encodeStateAsUpdate(document));
     });
+    server = new Hocuspocus({
+      unloadImmediately: false,
+      extensions: [{ onStoreDocument: store }],
+    });
+    jest.spyOn(HocuspocusServer, 'configure').mockReturnValue(server);
     gateway = new CollaborationGateway(
       {} as any,
       {
@@ -40,11 +51,6 @@ describe('CollaborationGateway direct edits', () => {
         getCollabUrl: () => '',
       } as any,
     );
-    server = new Hocuspocus({
-      unloadImmediately: false,
-      extensions: [{ onStoreDocument: store }],
-    });
-    (gateway as any).hocuspocus = server;
     jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -54,6 +60,105 @@ describe('CollaborationGateway direct edits', () => {
   });
 
   const change = (doc: Y.Doc) => doc.getText('test').insert(0, 'new body');
+
+  it('keeps the newer document when Redis-like delayed stores unload the old one', async () => {
+    jest.useFakeTimers();
+    let pending: {
+      timeout: ReturnType<typeof setTimeout>;
+      resolve: () => void;
+    };
+    const afterStore = jest.fn(async ({ socketId }) => {
+      if (socketId !== 'server') return;
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pending.resolve();
+      }
+      await new Promise<void>((resolve) => {
+        pending = {
+          resolve,
+          timeout: setTimeout(() => {
+            pending = undefined;
+            resolve();
+          }, 200),
+        };
+      });
+    });
+    server.configuration.extensions.push({ afterStoreDocument: afterStore });
+    let reopened: Awaited<ReturnType<Hocuspocus['openDirectConnection']>>;
+    let newer: Y.Doc;
+    try {
+      await gateway.withYdocConnection('page.id', context, change);
+      await jest.advanceTimersByTimeAsync(0);
+      const old = store.mock.calls[0][0].document;
+      expect(afterStore).toHaveBeenCalledTimes(2);
+      expect(server.documents.has('page.id')).toBe(false);
+      reopened = await server.openDirectConnection('page.id', context);
+      newer = reopened.document!;
+      expect(newer).not.toBe(old);
+      const destroyed = jest.fn();
+      newer.on('destroy', destroyed);
+      await jest.advanceTimersByTimeAsync(200);
+      expect(server.documents.get('page.id')).toBe(newer);
+      expect(destroyed).not.toHaveBeenCalled();
+    } finally {
+      await reopened?.disconnect();
+      await jest.advanceTimersByTimeAsync(200);
+      newer?.destroy();
+      jest.useRealTimers();
+    }
+  });
+
+  it('preserves callback HTTP errors and releases the failed connection', async () => {
+    const error = new ForbiddenException('edit forbidden');
+    await expect(
+      gateway.withYdocConnection('page.id', context, () => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    expect(store).not.toHaveBeenCalled();
+    expect(gateway.getDocumentCount()).toBe(0);
+  });
+
+  it('preserves a missing-page store error and unloads without storing again', async () => {
+    const error = new NotFoundException('Page with id id not found');
+    store.mockRejectedValueOnce(error);
+    await expect(
+      gateway.withYdocConnection('page.id', context, change),
+    ).rejects.toBe(error);
+    expect(store).toHaveBeenCalledTimes(1);
+    expect(gateway.getDocumentCount()).toBe(0);
+  });
+
+  it.each(['onLoadDocument', 'afterLoadDocument'] as const)(
+    'cleans up a real %s failure before a direct connection is returned',
+    async (hook) => {
+      server.configuration.extensions.push({
+        [hook]: async () => {
+          throw new Error('load failed');
+        },
+      });
+      const edit = jest.fn(change);
+      await expect(
+        gateway.withYdocConnection('page.id', context, edit),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+      expect(edit).not.toHaveBeenCalled();
+      expect(store).not.toHaveBeenCalled();
+      expect(gateway.getDocumentCount()).toBe(0);
+    },
+  );
+
+  it('preserves HTTP errors while opening and cleans up the document', async () => {
+    const error = new NotFoundException('missing page');
+    server.configuration.extensions.push({
+      afterLoadDocument: async () => {
+        throw error;
+      },
+    });
+    await expect(
+      gateway.withYdocConnection('page.id', context, change),
+    ).rejects.toBe(error);
+    expect(gateway.getDocumentCount()).toBe(0);
+  });
 
   it('retries swallowed lock conflicts without applying the edit again', async () => {
     store.mockRejectedValueOnce(undefined).mockRejectedValueOnce(undefined);
@@ -111,7 +216,7 @@ describe('CollaborationGateway direct edits', () => {
       gateway.withYdocConnection('page.id', context, () => {
         throw new Error('invalid edit');
       }),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    ).rejects.toBeInstanceOf(BadRequestException);
     expect(store).not.toHaveBeenCalled();
     expect(gateway.getDocumentCount()).toBe(0);
   });

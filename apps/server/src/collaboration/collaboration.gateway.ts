@@ -5,7 +5,13 @@ import { IncomingMessage } from 'http';
 import WebSocket from 'ws';
 import { AuthenticationExtension } from './extensions/authentication.extension';
 import { PersistenceExtension } from './extensions/persistence.extension';
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  InternalServerErrorException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { Redis } from '@hocuspocus/extension-redis';
 import { EnvironmentService } from '../integrations/environment/environment.service';
 import {
@@ -52,6 +58,13 @@ export class CollaborationGateway {
             ]),
       ],
     });
+    // Hocuspocus #832 / #1169 (upstream fix #1174): delayed stores may unload
+    // an old instance after the same name has been loaded into a new document.
+    const unload = this.hocuspocus.unloadDocument.bind(this.hocuspocus);
+    this.hocuspocus.unloadDocument = async (document) =>
+      this.hocuspocus.documents.get(document.name) === document
+        ? unload(document)
+        : undefined;
   }
 
   async withYdocConnection(
@@ -67,14 +80,34 @@ export class CollaborationGateway {
         'API edits of existing pages require a single API/collaboration process; COLLAB_URL must not be configured',
       );
     }
-    const connection = await this.hocuspocus.openDirectConnection(
-      documentName,
-      context,
-    );
+    // Opening failures have no confirmed edit to retry: report an internal
+    // failure, preserving explicit HTTP errors from loading extensions.
+    const connection = await this.hocuspocus
+      .openDirectConnection(documentName, context)
+      .catch(async (error) => {
+        // Loading hooks can fail before a DirectConnection is returned.
+        const document = this.hocuspocus.documents.get(documentName);
+        if (document && document.getConnectionsCount() === 0) {
+          await this.hocuspocus.unloadDocument(document);
+        }
+        if (error instanceof HttpException) throw error;
+        throw new InternalServerErrorException('Unable to open page', {
+          cause: error,
+        });
+      });
     const document = connection.document!;
     let persisted = false;
     try {
-      await connection.transact(change);
+      await connection.transact((doc) => {
+        try {
+          change(doc);
+        } catch (error) {
+          if (error instanceof HttpException) throw error;
+          throw new BadRequestException('Invalid page content', {
+            cause: error,
+          });
+        }
+      });
       // Redis 2.15 can silently skip persistence on lock contention. Its default
       // lock timeout is 1000ms; retry stores (not the edit) across that window.
       for (let retry = 0; retry < 5; retry++) {
@@ -92,6 +125,7 @@ export class CollaborationGateway {
       }
       persisted = true;
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       // Full-body replacement is idempotent, so callers can retry a failed upsert.
       // Connected browsers already see the edit and their next store may save it.
       throw new ServiceUnavailableException(
@@ -103,8 +137,8 @@ export class CollaborationGateway {
       // Use the public 2.15 Document lifecycle methods to release without saving
       // a failed write later, and unload idle docs so destroy() can complete.
       if (persisted) {
-        // Preserve Redis's afterStoreDocument sync delay on successful writes.
-        // A redundant disconnect store may fail, but this edit is committed.
+        // Disconnect requests another store; core does not await the Redis
+        // afterStoreDocument delay. This edit is already confirmed committed.
         try {
           await connection.disconnect();
         } catch {

@@ -6,7 +6,7 @@ import {
   onStoreDocumentPayload,
 } from '@hocuspocus/server';
 import * as Y from 'yjs';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { TiptapTransformer } from '@hocuspocus/transformer';
 import { getPageId, jsonToText, tiptapExtensions } from '../collaboration.util';
 import { PageRepo } from '@docmost/db/repos/page/page.repo';
@@ -124,7 +124,7 @@ export class PersistenceExtension implements Extension {
         });
 
         if (!page) {
-          throw new Error(`Page with id ${pageId} not found`);
+          throw new NotFoundException(`Page with id ${pageId} not found`);
         }
 
         if (isDeepStrictEqual(tiptapJson, page.content)) {

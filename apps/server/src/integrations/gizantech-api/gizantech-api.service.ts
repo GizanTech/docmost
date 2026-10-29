@@ -111,7 +111,6 @@ export class GizantechApiService {
         title,
         prosemirrorJson,
         authorId,
-        space.workspaceId,
       );
       return this.buildResult(
         existing.id,
@@ -130,13 +129,7 @@ export class GizantechApiService {
       title,
     );
     if (match) {
-      await this.updateExistingPage(
-        match.id,
-        title,
-        prosemirrorJson,
-        authorId,
-        space.workspaceId,
-      );
+      await this.updateExistingPage(match.id, title, prosemirrorJson, authorId);
       return this.buildResult(
         match.id,
         match.slugId,
@@ -245,25 +238,17 @@ export class GizantechApiService {
     title: string,
     content: any,
     authorId: string,
-    workspaceId: string,
   ): Promise<void> {
-    const user = await this.db
-      .selectFrom('users')
-      .select('id')
-      .where('id', '=', authorId)
-      .where('workspaceId', '=', workspaceId)
-      .where('deletedAt', 'is', null)
-      .where('deactivatedAt', 'is', null)
-      .executeTakeFirst();
-    if (!user) {
-      throw new BadRequestException('Author user not found');
-    }
+    // resolveAuthor already validated this id for the target workspace.
     await this.collaborationGateway.withYdocConnection(
       `page.${pageId}`,
-      { user },
+      { user: { id: authorId } },
       (document) => replaceYdocContent(document, content),
     );
-    await this.pageRepo.updatePage({ title, lastUpdatedById: authorId }, pageId);
+    await this.pageRepo.updatePage(
+      { title, lastUpdatedById: authorId },
+      pageId,
+    );
   }
 
   private async markdownToProsemirror(
@@ -517,23 +502,23 @@ export class GizantechApiService {
     workspaceId: string,
     authorUserId?: string,
   ): Promise<string> {
-    if (authorUserId) {
-      return authorUserId;
-    }
-    const envUser = process.env.GIZANTECH_API_USER_ID;
-    if (envUser) {
-      return envUser;
-    }
-    const user = await this.db
+    const requestedId = authorUserId || process.env.GIZANTECH_API_USER_ID;
+    let query = this.db
       .selectFrom('users')
-      .select(['id'])
+      .select('id')
       .where('workspaceId', '=', workspaceId)
       .where('deletedAt', 'is', null)
-      .orderBy('createdAt', 'asc')
-      .limit(1)
-      .executeTakeFirst();
+      .where('deactivatedAt', 'is', null);
+    query = requestedId
+      ? query.where('id', '=', requestedId)
+      : query.orderBy('createdAt', 'asc').limit(1);
+    const user = await query.executeTakeFirst();
     if (!user) {
-      throw new BadRequestException('No user available to attribute the page');
+      throw new BadRequestException(
+        requestedId
+          ? 'Author user not found'
+          : 'No user available to attribute the page',
+      );
     }
     return user.id;
   }

@@ -47,7 +47,13 @@ describe('GizantechApiService collaborative upsert', () => {
     db = {
       selectFrom: jest.fn((table) => {
         const query: any = {};
-        for (const method of ['select', 'selectAll', 'where'])
+        for (const method of [
+          'select',
+          'selectAll',
+          'where',
+          'orderBy',
+          'limit',
+        ])
           query[method] = jest.fn(() => query);
         query.executeTakeFirst = jest.fn(async () =>
           table === 'spaces'
@@ -179,6 +185,9 @@ describe('GizantechApiService collaborative upsert', () => {
     const query = db.selectFrom.mock.results.find(
       (_result: any, i: number) => db.selectFrom.mock.calls[i][0] === 'users',
     ).value;
+    expect(
+      db.selectFrom.mock.calls.filter(([table]) => table === 'users'),
+    ).toHaveLength(1);
     expect(query.select).toHaveBeenCalledWith('id');
     expect(query.selectAll).not.toHaveBeenCalled();
     expect(query.where).toHaveBeenCalledWith('deactivatedAt', 'is', null);
@@ -189,6 +198,61 @@ describe('GizantechApiService collaborative upsert', () => {
       'workspace-id',
     );
   });
+
+  it.each(['explicit', 'environment', 'fallback'])(
+    'validates the %s author once before a new-page insertion',
+    async (source) => {
+      const previous = process.env.GIZANTECH_API_USER_ID;
+      if (source === 'environment')
+        process.env.GIZANTECH_API_USER_ID = 'env-author';
+      else delete process.env.GIZANTECH_API_USER_ID;
+      (service as any).findByTitle.mockResolvedValue(undefined);
+      try {
+        await service.upsert({
+          spaceId: 'space-id',
+          markdown: 'body',
+          ...(source === 'explicit' ? { authorUserId: 'author' } : {}),
+        });
+        const userQueries = db.selectFrom.mock.results.filter(
+          (_result, i) => db.selectFrom.mock.calls[i][0] === 'users',
+        );
+        expect(userQueries).toHaveLength(1);
+        const query = userQueries[0].value;
+        expect(query.where).toHaveBeenCalledWith(
+          'workspaceId',
+          '=',
+          'workspace-id',
+        );
+        expect(query.where).toHaveBeenCalledWith('deletedAt', 'is', null);
+        expect(query.where).toHaveBeenCalledWith('deactivatedAt', 'is', null);
+        if (source === 'fallback') {
+          expect(query.orderBy).toHaveBeenCalledWith('createdAt', 'asc');
+          expect(query.limit).toHaveBeenCalledWith(1);
+        } else {
+          expect(query.where).toHaveBeenCalledWith(
+            'id',
+            '=',
+            source === 'explicit' ? 'author' : 'env-author',
+          );
+        }
+        expect(repo.insertPage).toHaveBeenCalledTimes(1);
+        authorAvailable = false;
+        await expect(
+          service.upsert({
+            spaceId: 'space-id',
+            markdown: 'body',
+            ...(source === 'explicit' ? { authorUserId: 'author' } : {}),
+          }),
+        ).rejects.toThrow(
+          source === 'fallback' ? 'No user available' : 'Author user not found',
+        );
+        expect(repo.insertPage).toHaveBeenCalledTimes(1);
+      } finally {
+        if (previous === undefined) delete process.env.GIZANTECH_API_USER_ID;
+        else process.env.GIZANTECH_API_USER_ID = previous;
+      }
+    },
+  );
 
   it('rejects an unavailable author before editing content or metadata', async () => {
     authorAvailable = false;
